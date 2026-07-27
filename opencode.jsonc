@@ -20,11 +20,11 @@
     },
     "vibecode": {
       "type": "remote",
-      "url": "http://127.0.0.1:64887/mcp?ws=%2FUsers%2Fekaterinafeneva%2F.local%2Fshare%2Fbitrix24-cowork%2Fcode%2Fa590bde553baaa51"
+      "url": "http://127.0.0.1:64887/mcp?ws=%2FUsers%2Fekaterinafeneva%2F.local%2Fshare%2Fbitrix24-cowork%2Fcode%2Ff8733ddbeb2617de"
     },
     "openwork-ui": {
       "type": "remote",
-      "url": "http://127.0.0.1:65424/mcp"
+      "url": "http://127.0.0.1:54905/mcp"
     }
   }
 }
