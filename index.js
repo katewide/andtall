@@ -1,65 +1,299 @@
-const express = require('express');
-const axios = require('axios');
+const http = require('http');
+const https = require('https');
 
-const app = express();
-const port = process.env.PORT || 3000;
+function requireEnv(name) {
+  const value = process.env[name];
+  if (!value) throw new Error(`Missing required env ${name}`);
+  return value;
+}
 
-const BASE_URL = process.env.BASE_URL;
-const API_KEY = process.env.API_KEY;
-const AI_ROUTER_URL = `${BASE_URL}/v1/chat/completions`;
-const MODEL_NAME = 'bitrix/google/gemma-4-26B-A4B-it';
+function getBitrixRestWebhookUrl() {
+  const webhookUrl = process.env.BITRIX_REST_WEBHOOK_URL || process.env.WEBHOOK_COMMENT_URL;
+  if (!webhookUrl) throw new Error('Missing required env BITRIX_REST_WEBHOOK_URL');
 
-const WEBHOOK_COMMENT_URL = process.env.WEBHOOK_COMMENT_URL;
-const AUTHOR_ID = Number(process.env.AUTHOR_ID);
-const REQUIRED_ENV_VARS = ['BASE_URL', 'API_KEY', 'WEBHOOK_COMMENT_URL', 'AUTHOR_ID'];
+  return webhookUrl
+    .replace(/task\.commentitem\.add(?:\.json)?$/i, '')
+    .replace(/\/?$/, '/');
+}
 
-function validateConfig() {
-  const missingVars = REQUIRED_ENV_VARS.filter((name) => !process.env[name]);
+const PORT = process.env.PORT || 3000;
+const BASE_URL = requireEnv('BASE_URL');
+const API_KEY = requireEnv('API_KEY');
+const MODEL_NAME = process.env.MODEL_NAME || 'bitrix/google/gemma-4-26B-A4B-it';
 
-  if (missingVars.length > 0) {
-    throw new Error(`Missing required environment variables: ${missingVars.join(', ')}`);
+const BITRIX_REST_WEBHOOK_URL = getBitrixRestWebhookUrl();
+const WEBHOOK_TOKEN = requireEnv('WEBHOOK_TOKEN');
+const AUTHOR_ID = Number(requireEnv('AUTHOR_ID'));
+
+function log(message, data) {
+  console.log(`[${new Date().toISOString()}] ${message}`, data ? JSON.stringify(data) : '');
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => { body += chunk.toString(); });
+    req.on('end', () => resolve(body));
+    req.on('error', reject);
+  });
+}
+
+function parseFormUrlEncoded(body) {
+  const result = {};
+
+  for (const [key, value] of new URLSearchParams(body)) {
+    const parts = key.split(/[\[\]]/).filter(Boolean);
+    let current = result;
+
+    parts.forEach((part, index) => {
+      if (index === parts.length - 1) {
+        current[part] = value;
+        return;
+      }
+
+      current[part] ||= {};
+      current = current[part];
+    });
   }
 
-  if (!Number.isFinite(AUTHOR_ID)) {
-    throw new Error('AUTHOR_ID must be a number');
+  return result;
+}
+
+function appendParams(params, value, prefix) {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => appendParams(params, item, `${prefix}[${index}]`));
+    return;
   }
+
+  if (value && typeof value === 'object') {
+    Object.entries(value).forEach(([key, item]) => {
+      appendParams(params, item, prefix ? `${prefix}[${key}]` : key);
+    });
+    return;
+  }
+
+  if (prefix) params.append(prefix, value == null ? '' : String(value));
 }
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+function requestJson(endpoint, options = {}) {
+  const client = endpoint.protocol === 'https:' ? https : http;
 
-function getTaskId(req) {
-  return req.query.task_id;
+  return new Promise((resolve, reject) => {
+    const req = client.request(endpoint, options, res => {
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        let json = null;
+
+        try {
+          json = data ? JSON.parse(data) : null;
+        } catch {
+          reject(new Error(`Invalid JSON from ${endpoint.pathname}: ${data}`));
+          return;
+        }
+
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          reject(new Error(`HTTP ${res.statusCode} from ${endpoint.pathname}: ${data}`));
+          return;
+        }
+
+        if (json?.error) {
+          reject(new Error(json.error_description || json.error));
+          return;
+        }
+
+        if (json?.success === false) {
+          reject(new Error(json.error?.message || json.error?.code || 'API returned success=false'));
+          return;
+        }
+
+        resolve(json);
+      });
+    });
+
+    req.on('error', reject);
+    if (options.body) req.write(options.body);
+    req.end();
+  });
 }
 
-function getParentId(req) {
-  return req.query.parent_id;
+function bitrixCall(method, params = {}) {
+  const endpoint = new URL(`${method}.json`, BITRIX_REST_WEBHOOK_URL);
+  const body = new URLSearchParams();
+  appendParams(body, params);
+
+  return requestJson(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  });
 }
 
-function getResponsibleId(req) {
-  const responsibleId = req.query.responsible_id;
+function coworkRequest(method, path, body) {
+  return requestJson(new URL(`/v1${path}`, BASE_URL), {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Api-Key': API_KEY,
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+}
 
-  if (!responsibleId) return null;
+function unwrapData(response) {
+  return response?.data || response?.result || response || null;
+}
 
-  return String(responsibleId).replace(/^user_/i, '');
+function getTaskIdFromOutgoingWebhook(body) {
+  return (
+    body?.data?.FIELDS_AFTER?.ID ||
+    body?.data?.FIELDS_BEFORE?.ID ||
+    body?.data?.ID ||
+    body?.data?.id ||
+    body?.task_id ||
+    body?.taskId ||
+    null
+  );
+}
+
+function getParentIdFromTask(task) {
+  return task?.parentId ? String(task.parentId) : null;
+}
+
+function getResponsibleIdFromTask(task) {
+  const responsibleId = (
+    task?.responsibleId ||
+    task?.responsibleID ||
+    task?.ResponsibleID ||
+    task?.responsible_id ||
+    task?.RESPONSIBLE_ID ||
+    task?.responsible?.id ||
+    task?.assignee?.id
+  );
+  return responsibleId ? String(responsibleId).replace(/^user_/i, '') : null;
+}
+
+function getGroupIdFromTask(task) {
+  const groupId = task?.groupId || task?.groupID || task?.GroupID || task?.group_id || task?.GROUP_ID || task?.group?.id;
+  return groupId ? String(groupId) : null;
+}
+
+function getGroupNameFromTask(task) {
+  return task?.groupName || task?.group?.name || task?.group?.title || null;
+}
+
+function isCollabGroupName(groupName) {
+  return String(groupName || '').toLowerCase().includes('коллаба');
+}
+
+function normalizeId(value) {
+  const id = Number.parseInt(value, 10);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+function normalizeIds(value) {
+  if (!value) return [];
+
+  const raw = Array.isArray(value)
+    ? value
+    : typeof value === 'object'
+      ? Object.values(value)
+      : [value];
+
+  return [...new Set(raw.map(normalizeId).filter(Boolean))];
+}
+
+function normalizeHistoryField(field) {
+  return String(field || '').replace(/[^a-z0-9]/gi, '').toUpperCase();
+}
+
+function normalizeTaskPayload(response) {
+  const data = unwrapData(response);
+  return data?.task || data?.Task || data;
+}
+
+function normalizeCommentsPayload(response) {
+  const data = unwrapData(response);
+  const comments = data?.comments || data?.Comments || data?.items || data?.list || data;
+  return Array.isArray(comments) ? comments : [];
+}
+
+function normalizeTimePayload(response) {
+  const data = unwrapData(response);
+  return Array.isArray(data) ? data : [];
+}
+
+async function addAccomplice(taskId, userId) {
+  const taskResponse = await coworkRequest('GET', `/tasks/${taskId}`);
+  const task = normalizeTaskPayload(taskResponse);
+  const accomplices = normalizeIds(task?.accomplices || task?.accompliceIds || task?.ACCOMPLICES);
+  const normalizedUserId = normalizeId(userId);
+
+  if (!normalizedUserId) throw new Error(`Invalid accomplice user ID: ${userId}`);
+
+  if (accomplices.includes(normalizedUserId)) {
+    return { added: false, reason: 'already_accomplice', taskId, userId: normalizedUserId };
+  }
+
+  const nextAccomplices = [...accomplices, normalizedUserId];
+  await coworkRequest('PATCH', `/tasks/${taskId}`, { accomplices: nextAccomplices });
+
+  return { added: true, taskId, userId: normalizedUserId };
+}
+
+async function getLatestUpdateBatch(taskId) {
+  const response = await bitrixCall('tasks.task.history.list', {
+    taskId,
+    order: { createdDate: 'DESC' },
+  });
+
+  const history = Array.isArray(response?.result?.list)
+    ? response.result.list
+    : Array.isArray(response?.result)
+      ? response.result
+      : [];
+
+  const sortedHistory = history
+    .map(item => ({ ...item, createdAtMs: Date.parse(item.createdDate) }))
+    .filter(item => Number.isFinite(item.createdAtMs))
+    .sort((a, b) => b.createdAtMs - a.createdAtMs);
+
+  const latestChange = sortedHistory[0];
+  if (!latestChange) return [];
+
+  return sortedHistory.filter(item => latestChange.createdAtMs - item.createdAtMs <= 2000);
+}
+
+function findLatestFieldChange(updateBatch, fieldName) {
+  const normalizedFieldName = normalizeHistoryField(fieldName);
+  return updateBatch.find(item => normalizeHistoryField(item.field) === normalizedFieldName && item.value);
 }
 
 async function fetchTaskWithComments(taskId) {
-  const headers = { 'X-Api-Key': API_KEY };
-
-  const [taskRes, commentsRes] = await Promise.allSettled([
-    axios.get(`${BASE_URL}/v1/tasks/${taskId}`, { headers }),
-    axios.get(`${BASE_URL}/v1/tasks/${taskId}/comments`, { headers })
+  const [taskResult, commentsResult] = await Promise.allSettled([
+    coworkRequest('GET', `/tasks/${taskId}`),
+    coworkRequest('GET', `/tasks/${taskId}/comments`),
   ]);
 
-  if (taskRes.status === 'rejected') {
-    throw new Error(`Failed to fetch task ${taskId}: ${taskRes.reason.message}`);
+  if (taskResult.status === 'rejected') {
+    throw new Error(`Failed to fetch task ${taskId}: ${taskResult.reason.message}`);
   }
 
+  const task = normalizeTaskPayload(taskResult.value);
+  const comments = commentsResult.status === 'fulfilled'
+    ? normalizeCommentsPayload(commentsResult.value)
+    : [];
+
   return {
-    task: taskRes.value.data,
-    comments: commentsRes.status === 'fulfilled' ? commentsRes.value.data : []
+    task,
+    comments,
   };
+}
+
+async function fetchTaskTimeLogs(taskId) {
+  const response = await coworkRequest('GET', `/tasks/${taskId}/time`);
+  return normalizeTimePayload(response);
 }
 
 function buildPrompt({ taskId, responsibleId, mainTask, mainComments, contextparentID }) {
@@ -67,7 +301,7 @@ function buildPrompt({ taskId, responsibleId, mainTask, mainComments, contextpar
     currentTaskId: taskId,
     responsibleId,
     currentTask: mainTask,
-    currentTaskComments: mainComments
+    currentTaskComments: mainComments,
   };
 
   return `Ты - профессиональный консультант 1С. Твоя задача - проанализировать данные задачи и написать краткий итог. Ты анализируешь задачи компании-франчайзи 1С. Используй профессиональную терминологию, принятую в сфере внедрения и сопровождения продуктов 1С.
@@ -84,6 +318,7 @@ ${JSON.stringify(contextparentID, null, 2)}
 - Если есть несоответствие данных задачи и комментариев, ориентируйся на комментарии.
 - Используй только информацию, содержащуюся в JSON. Ничего не выдумывай и не добавляй от себя.
 - Не добавляй технические детали, если они отсутствуют в исходных данных.
+- "доработка" - изменение уже имеющегося функционала, "разработка" - добавление нового функционала, "доработка" и "разработка" это не одно и тоже, не искажай смысл этих слов из полученных сведений по задаче.
 - Не называй конкретные механизмы 1С (планы обмена, регистры, EnterpriseData, СКД и т.п.), если они прямо не указаны или очевидно не следуют из контекста.
 
 ЖЕСТКИЕ ПРАВИЛА нормализации отраслевой терминологии 1С <Таблица трансформации>:
@@ -166,74 +401,147 @@ ${JSON.stringify(contextparentID, null, 2)}
 ⚠️ [b]Недостаточно информации.[/b] [USER=<responsibleId>]Исполнитель[/USER], пожалуйста, напиши пояснения.`;
 }
 
-app.post('/webhook', async (req, res) => {
+async function processClosedTask(taskId) {
+  const { task: mainTask, comments: mainComments } = await fetchTaskWithComments(taskId);
+  const parentId = getParentIdFromTask(mainTask);
+  const responsibleId = getResponsibleIdFromTask(mainTask);
+  const groupId = getGroupIdFromTask(mainTask);
+  const groupName = getGroupNameFromTask(mainTask);
+  const timeLogs = await fetchTaskTimeLogs(taskId);
+  let contextparentID = null;
+
+  log('Closed task context loaded', { taskId, parentId, responsibleId, groupId, groupName, time_logs_count: timeLogs.length });
+
+  if (timeLogs.length === 0) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: 'empty_time_logs',
+      task_id: taskId,
+      time_logs_count: timeLogs.length,
+    };
+  }
+
+  if (isCollabGroupName(groupName)) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: 'collab_group_name',
+      task_id: taskId,
+      group_id: groupId,
+      group_name: groupName,
+    };
+  }
+
+  if (parentId && parentId !== '0') {
+    const { task: parentTask, comments: parentComments } = await fetchTaskWithComments(parentId);
+    contextparentID = { parentId, parentTask, parentTaskComments: parentComments };
+    log('Parent task context loaded', { taskId, parentId });
+  }
+
+  const aiResponse = await coworkRequest('POST', '/chat/completions', {
+    model: MODEL_NAME,
+    messages: [{
+      role: 'user',
+      content: buildPrompt({ taskId, responsibleId, mainTask, mainComments, contextparentID }),
+    }],
+  });
+
+  const aiComment = aiResponse?.choices?.[0]?.message?.content?.trim();
+  if (!aiComment) throw new Error('Gemma returned empty comment');
+
+  await bitrixCall('task.commentitem.add', {
+    TASKID: taskId,
+    FIELDS: {
+      POST_MESSAGE: aiComment,
+      AUTHOR_ID,
+    },
+  });
+
+  return {
+    ok: true,
+    task_id: taskId,
+    parent_id: parentId || null,
+    responsible_id: responsibleId,
+    group_id: groupId || null,
+    group_name: groupName || null,
+    time_logs_count: timeLogs.length,
+    ai_comment: aiComment,
+  };
+}
+
+async function handleWebhook(body) {
+  const data = parseFormUrlEncoded(body);
+
+  if (data.auth?.application_token !== WEBHOOK_TOKEN) {
+    return { statusCode: 403, data: { ok: false, error: 'Invalid webhook token' } };
+  }
+
+  if (data.event !== 'ONTASKUPDATE') {
+    return { statusCode: 200, data: { ok: true, ignored: true, reason: 'unsupported_event' } };
+  }
+
+  const taskId = getTaskIdFromOutgoingWebhook(data);
+  if (!taskId) throw new Error('No task ID found');
+
+  const updateBatch = await getLatestUpdateBatch(taskId);
+  const responsibleChange = findLatestFieldChange(updateBatch, 'RESPONSIBLE_ID');
+  const statusChange = findLatestFieldChange(updateBatch, 'STATUS');
+  const actions = [];
+
+  const previousResponsibleId = normalizeId(responsibleChange?.value?.from);
+  if (previousResponsibleId) {
+    const result = await addAccomplice(taskId, previousResponsibleId);
+    actions.push({ branch: 'responsible_changed', ...result });
+  }
+
+  if (String(statusChange?.value?.to) === '5') {
+    const result = await processClosedTask(taskId);
+    actions.push({ branch: 'task_closed', ...result });
+  }
+
+  if (actions.length === 0) {
+    return {
+      statusCode: 200,
+      data: {
+        ok: true,
+        ignored: true,
+        reason: 'latest_update_has_no_tracked_fields',
+        task_id: taskId,
+        latest_fields: updateBatch.map(item => item.field),
+      },
+    };
+  }
+
+  return { statusCode: 200, data: { ok: true, task_id: taskId, actions } };
+}
+
+function sendJson(res, statusCode, data) {
+  res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(data));
+}
+
+const server = http.createServer(async (req, res) => {
   try {
-    const taskId = getTaskId(req);
-    if (!taskId) throw new Error('No task_id found');
-
-    const parentId = getParentId(req);
-    const responsibleId = getResponsibleId(req);
-    const { task: mainTask, comments: mainComments } = await fetchTaskWithComments(taskId);
-
-    let contextparentID = null;
-
-    if (parentId && parentId !== '0') {
-      const { task: parentTask, comments: parentComments } = await fetchTaskWithComments(parentId);
-
-      contextparentID = {
-        parentId,
-        parentTask,
-        parentTaskComments: parentComments
-      };
+    if (req.method === 'GET' && req.url.split('?')[0] === '/health') {
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('OK');
+      return;
     }
 
-    const prompt = buildPrompt({
-      taskId,
-      responsibleId,
-      mainTask,
-      mainComments,
-      contextparentID
-    });
+    if (req.method !== 'POST' || req.url.split('?')[0] !== '/webhook') {
+      sendJson(res, 404, { ok: false, error: 'Not found' });
+      return;
+    }
 
-    const aiResponse = await axios.post(
-      AI_ROUTER_URL,
-      {
-        model: MODEL_NAME,
-        messages: [{ role: 'user', content: prompt }]
-      },
-      {
-        headers: { 'X-Api-Key': API_KEY, 'Content-Type': 'application/json' }
-      }
-    );
-
-    const aiComment = aiResponse.data.choices[0].message.content.trim();
-
-    await axios.post(WEBHOOK_COMMENT_URL, {
-      taskId,
-      fields: {
-        POST_MESSAGE: aiComment,
-        AUTHOR_ID
-      }
-    });
-
-    res.json({
-      ok: true,
-      task_id: taskId,
-      parent_id: parentId || null,
-      responsible_id: responsibleId,
-      ai_comment: aiComment
-    });
-  } catch (err) {
-    const errorMsg = err.response ? JSON.stringify(err.response.data) : err.message;
-    console.error('Agent error:', errorMsg);
-    res.status(500).json({ ok: false, error: errorMsg });
+    const result = await handleWebhook(await readBody(req));
+    sendJson(res, result.statusCode, result.data);
+  } catch (error) {
+    log('Webhook failed', { error: error.message });
+    sendJson(res, 500, { ok: false, error: error.message });
   }
 });
 
-app.get('/health', (req, res) => res.status(200).send('OK'));
-
-validateConfig();
-
-app.listen(port, () => {
-  console.log(`AI Agent running on port ${port}`);
+server.listen(PORT, () => {
+  log(`Server running on port ${PORT}`);
 });
