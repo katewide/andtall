@@ -522,13 +522,15 @@ function sendJson(res, statusCode, data) {
 
 const server = http.createServer(async (req, res) => {
   try {
-    if (req.method === 'GET' && req.url.split('?')[0] === '/health') {
+    const pathname = req.url.split('?')[0];
+
+    if (req.method === 'GET' || req.method === 'HEAD') {
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end('OK');
+      res.end(req.method === 'HEAD' ? undefined : 'OK');
       return;
     }
 
-    if (req.method !== 'POST' || req.url.split('?')[0] !== '/webhook') {
+    if (req.method !== 'POST' || pathname !== '/webhook') {
       sendJson(res, 404, { ok: false, error: 'Not found' });
       return;
     }
