@@ -17,7 +17,8 @@ function parsePeriod(from, to) {
 }
 
 function createBulkTagging(deps) {
-  const { request, normalizeTask, normalizeTasks, getGroupId, getGroupName, isCollab, excludedGroupIds, classify, updateTags, deadline, enabled } = deps;
+  const { request, normalizeTask, normalizeTasks, getGroupId, getGroupName, isCollab, excludedGroupIds: configuredExcludedGroupIds, classify, updateTags, deadline, enabled } = deps;
+  const excludedGroupIds = new Set(['0', ...configuredExcludedGroupIds].map(String));
   const jobs = new Map();
   const terminal = job => !['selecting', 'ready', 'running'].includes(job.status);
   const busy = () => [...jobs.values()].find(job => ['selecting', 'running'].includes(job.status));
@@ -33,8 +34,6 @@ function createBulkTagging(deps) {
     if (groupId == null || !/^\d+$/.test(String(groupId))) return 'group_unknown';
     if (excludedGroupIds.has(String(groupId))) return 'excluded_group';
     if (isCollab(getGroupName(task))) return 'collab_group';
-    // Personal tasks (group 0) were allowed by the original tagging scenario.
-    if (String(groupId) === '0') return null;
     let info = groupCache?.get(String(groupId));
     if (!info) {
       // Do not use the legacy persistent group cache before writes: names can change.

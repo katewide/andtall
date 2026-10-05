@@ -48,7 +48,7 @@ test('selection paginates short pages using hasMore, deduplicates, and sends ser
  assert.equal(job.status,'ready');assert.deepEqual(job.tasks.map(t=>t.id),['1','2','3']);assert.equal(state.writes.length,0);assert.equal(state.ai.length,0);
  const calls=state.calls.filter(c=>c.url==='/tasks/search');assert.deepEqual(calls.map(c=>c.body.offset),[0,2]);
  assert.equal(calls[0].body.autoWindow,false);assert.equal('realStatus' in calls[0].body.filter,false);assert.equal('status' in calls[0].body.filter,false);
- assert.deepEqual(calls[0].body.filter.groupId.$nin,[12,58,92,140,376,490]);
+ assert.deepEqual(calls[0].body.filter.groupId.$nin,[0,12,58,92,140,376,490]);
  assert.deepEqual(calls[0].body.filter.closedDate,{$gte:'2025-08-31T21:00:00.000Z',$lt:'2025-09-30T21:00:00.000Z'});
 });
 test('selection independently excludes IDs, collabs and exact upper bound but accepts reopened tasks',async()=>{
@@ -144,5 +144,20 @@ test('tagging ignores current or changed status when close date remains in range
   deps.classify=async()=>{state.current.status=2;return {tagClassification:{found:true}};};
   const result=await createBulkTagging(deps).processTask('1',period);
   assert.equal(result.updated,true);assert.equal(state.writes.length,1);
+ }
+});
+
+test('group zero is excluded from selection for numeric and string IDs without group lookups',async()=>{
+ const {bulk,state}=setup();state.tasks=[task(1,{groupId:0}),task(2,{groupId:'0'}),task(3)];
+ const job=await select(bulk);assert.equal(job.status,'ready');assert.deepEqual(job.tasks.map(t=>t.id),['3']);assert.equal(job.excludedReasons.excluded_group,2);
+ assert(!state.calls.some(call=>call.url==='/workgroups/0'));assert.equal(state.ai.length,0);assert.equal(state.writes.length,0);
+ assert(bulk.publicJob(job).excluded_groups.includes('0'));
+});
+test('group zero blocks analysis and moving to group zero during AI blocks writes',async()=>{
+ for(const movesDuringAI of [false,true]){
+  const {state,deps}=setup();if(!movesDuringAI)state.current.groupId=0;
+  deps.classify=async()=>{state.ai.push('1');state.current.groupId='0';return {tagClassification:{found:true}};};
+  const result=await createBulkTagging(deps).processTask('1',period);
+  assert.equal(result.reason,'excluded_group');assert.equal(state.ai.length,movesDuringAI?1:0);assert.equal(state.writes.length,0);
  }
 });
