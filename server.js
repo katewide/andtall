@@ -16,7 +16,7 @@ function requireEnv(name) {
 }
 
 const PORT = process.env.PORT || 3000;
-const APP_VERSION = 'tags-only-2026-10-06';
+const APP_VERSION = 'bulk-tags-close-date-2026-10-06';
 const BASE_URL = requireEnv('BASE_URL');
 const API_KEY = requireEnv('API_KEY');
 const SUMMARY_MODEL_NAME = process.env.SUMMARY_MODEL_NAME || process.env.MODEL_NAME || 'bitrix/google/gemma-4-26B-A4B-it';
@@ -2780,11 +2780,11 @@ function isRecentAiTagUpdate(taskId) {
   return true;
 }
 
-async function updateTaskTags(taskId, classification, currentTask = null) {
+async function updateTaskTags(taskId, classification, currentTask = null, options = {}) {
   if (!TASK_TAGGING_ENABLED) {
     return { updated: false, skipped: true, reason: 'tagging_disabled', tags: getTaskTags(currentTask), error: null };
   }
-  if (!getTaskResultFieldValue(currentTask).trim()) {
+  if (options.requireSummary !== false && !getTaskResultFieldValue(currentTask).trim()) {
     return { updated: false, skipped: true, reason: 'task_summary_empty', tags: getTaskTags(currentTask), error: null };
   }
   if (!classification.found) {
@@ -3341,6 +3341,10 @@ async function processClosedTask(taskId, options = {}) {
     }
   };
   const { task: mainTask, comments: mainComments, commentsSource } = await fetchTaskWithComments(taskId);
+  if (options.validateTask) {
+    const reason = await options.validateTask(mainTask);
+    if (reason) return { skipped: true, reason };
+  }
   const filteredMainComments = filterGemmaComments(mainComments);
   const parentId = getParentIdFromTask(mainTask);
   const responsibleId = getResponsibleIdFromTask(mainTask);
@@ -5144,8 +5148,24 @@ function scheduleNextOpenTaskWatchCheck() {
   }, delayMs);
 }
 
+const bulkTagging = require('./bulk-tagging.cjs').createBulkTagging({
+  request: coworkRequest,
+  normalizeTask: normalizeTaskPayload,
+  normalizeTasks: normalizeTaskListPayload,
+  getGroupId: getGroupIdFromTask,
+  getGroupName: getGroupNameFromTask,
+  isCollab: isCollabGroupName,
+  excludedGroupIds: GEMMA_EXCLUDED_GROUP_IDS,
+  enabled: () => TASK_TAGGING_ENABLED,
+  token: process.env.BULK_TAGGING_TOKEN || WEBHOOK_TOKEN,
+  classify: (taskId, validateTask) => processClosedTask(taskId, { dryRun: true, preview: true, tagsOnly: true, validateTask }),
+  updateTags: (taskId, classification, task) => updateTaskTags(taskId, classification, task, { requireSummary: false }),
+  deadline: operation => runPreviewDeadline(operation, AI_PREVIEW_TIMEOUT_MS),
+});
+
 const server = http.createServer(async (req, res) => {
   try {
+    if (await bulkTagging.handle(req, res)) return;
     const pathname = req.url.split('?')[0];
 
     saveDebug('lastRequest', {

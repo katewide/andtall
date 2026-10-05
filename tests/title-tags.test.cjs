@@ -175,3 +175,16 @@ test('close writes all three parts of one response and summary event reuses comp
  assert.equal((await c.processTaskSummaryTags('1')).reason,'task_summary_already_tagged');assert.equal(state.ai,1);
 });
 
+
+test('bulk explicitly bypasses empty summary while webhook keeps the summary guard', async()=>{
+ const {c,state}=setup();state.task={tags:['manual'],UF_TASK_SUMMARY:''};
+ const classification={found:true,type:'консультация',products:[],objects:[]};
+ assert.equal((await c.updateTaskTags('1',classification,state.task)).reason,'task_summary_empty');
+ const result=await c.updateTaskTags('1',classification,state.task,{requireSummary:false});assert(result.updated);
+ const writes=state.calls.filter(call=>call.method==='PATCH');assert.equal(writes.length,1);assert.deepEqual(Object.keys(writes[0].body),['tags']);assert.deepEqual(JSON.parse(JSON.stringify(writes[0].body.tags)),['manual','type: консультация']);
+});
+test('bulk eligibility callback rejects moved tasks before AI work',async()=>{
+ const {c,state}=setup();
+ const result=await c.processClosedTask('1',{dryRun:true,preview:true,tagsOnly:true,validateTask:async()=> 'excluded_group'});
+ assert.equal(result.reason,'excluded_group');assert.equal(state.ai,0);assert(!state.calls.some(call=>call.method==='PATCH'));
+});

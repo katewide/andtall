@@ -9,6 +9,7 @@ function boot() {
   class Database { serialize(fn) { fn(); } run() {} }
   const context = vm.createContext({
     require(name) {
+      if (name === './bulk-tagging.cjs') return require('../bulk-tagging.cjs');
       if (name === 'http') return { createServer(fn) { state.handler = fn; return { listen(port, ready) { ready(); } }; } };
       if (name === 'https') return { request() { throw Error('Unexpected network request'); } };
       if (name === 'sqlite3') return { verbose: () => ({ Database }) };
@@ -29,7 +30,7 @@ test('startup schedules no monitoring even when legacy flags are enabled', () =>
 });
 test('disabled manual routes return 404 for GET, HEAD and POST without work', async () => {
   const state = boot();
-  for (const route of ['/ai-test', '/ai-preview', '/ai-preview/status', '/open-tasks-check', '/open-task-eligibility', '/time-check', '/time-entry-baseline']) {
+  for (const route of ['/ai-preview', '/ai-preview/status', '/open-tasks-check', '/open-task-eligibility', '/time-check', '/time-entry-baseline']) {
     for (const method of ['GET', 'HEAD', 'POST']) {
       let status;
       const req = { method, url: route, headers: {}, on(event, fn) { if (event === 'end') fn(); return this; } };
@@ -44,4 +45,10 @@ test('health endpoint stays available', async () => {
   const state = boot(); let status, body;
   await state.handler({ method: 'GET', url: '/', headers: {} }, { writeHead(code) { status = code; }, end(value) { body = value; } });
   assert.equal(status, 200); assert.equal(body, 'OK');
+});
+
+test('ai-test serves the bulk close-date form without starting work', async () => {
+ const state = boot(); let status, body;
+ await state.handler({method:'GET',url:'/ai-test',headers:{}},{writeHead(code){status=code;},end(value){body=value;}});
+ assert.equal(status,200);assert.match(body,/type="date"/);assert.match(body,/Хэштеги за период/);assert.equal(state.timers.length,0);
 });

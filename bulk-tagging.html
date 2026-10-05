@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Хэштеги за период</title>
+<style>
+:root{font-family:system-ui,-apple-system,sans-serif;color:#17233b;background:#f2f5fa}*{box-sizing:border-box}body{margin:0}main{max-width:1100px;margin:48px auto;padding:0 24px}h1{font-size:32px;letter-spacing:-1px;margin-bottom:8px}.muted{color:#5d6b81;line-height:1.6}.card{background:white;border:1px solid #dde4ee;border-radius:16px;padding:24px;margin:20px 0}.fields,.actions,.stats{display:flex;gap:16px;flex-wrap:wrap;align-items:end}label{display:flex;flex-direction:column;gap:8px;font-size:14px;font-weight:600;flex:1;min-width:180px}input,button{font:inherit;padding:12px 14px;border-radius:8px;border:1px solid #becadc}button{cursor:pointer;background:#fff;font-weight:600}button.primary{background:#245bd7;color:white;border-color:#245bd7}button:disabled{opacity:.45;cursor:default}.actions{margin-top:20px}.stats{align-items:start;margin:20px 0}.stat{flex:1;min-width:120px;background:#f3f6fb;border-radius:10px;padding:16px}.stat strong{display:block;font-size:26px}.stat span{font-size:13px;color:#5d6b81}progress{width:100%;height:12px;accent-color:#245bd7}.error{color:#a82030;white-space:pre-wrap}table{border-collapse:collapse;width:100%;font-size:14px}td,th{text-align:left;padding:12px;border-bottom:1px solid #e4e9f1;vertical-align:top;overflow-wrap:anywhere}th{color:#5d6b81;font-weight:500}.table-wrap{overflow:auto}code{background:#edf2fa;padding:2px 5px;border-radius:4px}.badge{font-size:12px;color:#245bd7;text-transform:uppercase;letter-spacing:1px}#status{font-weight:600}#details{white-space:pre-wrap;line-height:1.5}button.danger{color:#a82030}@media(max-width:650px){main{margin:24px auto;padding:0 14px}.card{padding:18px}h1{font-size:27px}}
+</style>
+</head>
+<body><main>
+<span class="badge">Задачи · Битрикс24</span><h1>Хэштеги за период</h1>
+<p class="muted">Выберите даты закрытия задач. Сначала проверьте отбор, затем запустите установку тегов.</p>
+<section class="card"><form id="selection">
+<div class="fields"><label>Закрыты с<input id="from" type="date" required></label><label>По дату включительно<input id="to" type="date" required></label><label>Ключ запуска<input id="token" type="password" required autocomplete="off" placeholder="BULK_TAGGING_TOKEN"></label></div>
+<p class="muted">Время Москвы (UTC+3). Только завершённые задачи. Исключены группы <strong>12, 58, 92, 140, 376, 490</strong> и группы с «коллаб» в названии. Заполненный summary не требуется. Ручные теги сохраняются.</p>
+<div class="actions"><button class="primary" id="select" type="submit">Найти задачи</button><button id="resume" type="button">Восстановить последний запуск</button></div>
+</form></section>
+<p id="error" class="error" role="alert"></p>
+<section id="job" class="card" hidden>
+<div id="status" role="status" aria-live="polite"></div><p id="period" class="muted"></p>
+<div class="stats"><div class="stat"><strong id="selected">0</strong><span>К обработке</span></div><div class="stat"><strong id="excluded">0</strong><span>Исключено</span></div><div class="stat"><strong id="updated">0</strong><span>Обновлено</span></div><div class="stat"><strong id="skipped">0</strong><span>Пропущено</span></div><div class="stat"><strong id="failed">0</strong><span>Ошибки</span></div></div>
+<progress id="progress" value="0" max="1"></progress><p id="details" class="muted"></p>
+<div class="actions"><button id="start" class="primary" type="button" disabled>Установить теги</button><button id="cancel" class="danger" type="button" disabled>Остановить</button><button id="refresh" type="button">Обновить</button><button id="remove" type="button" disabled>Удалить отбор из истории</button></div>
+<p class="muted">Обработка идёт последовательно в фоне. Остановка действует после текущей задачи; уже записанные теги сохраняются. История хранится в памяти сервера; старые записи очищаются при новых запусках через 24 часа; перезапуск сервера прерывает запуск.</p>
+<h2 id="table-title">Отобранные задачи</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>Задача</th><th>Результат / дата закрытия</th><th>Теги</th></tr></thead><tbody id="rows"></tbody></table></div>
+<div class="actions"><button id="prev" type="button">← Назад</button><span id="page"></span><button id="next" type="button">Далее →</button></div>
+</section>
+<script>
+const $ = id => document.getElementById(id);
+let jobId = null, offset = 0, timer, active = false, lastJob;
+const statusNames = {selecting:'Идёт отбор задач…',ready:'Отбор готов. Можно установить теги.',running:'Устанавливаем теги…',completed:'Обработка завершена',cancelled:'Остановлено',failed:'Запуск завершился с ошибкой'};
+const reasons = {excluded_group:'Исключённая группа',collab_group:'Группа-коллаб',group_unknown:'Группу не удалось проверить',not_closed:'Задача уже не закрыта',outside_period:'Дата закрытия вне периода',same_value:'Теги уже установлены',classification_empty:'Нет категорий для тегов',ai_tags_missing_or_invalid:'AI не вернул корректные теги',tagging_disabled:'Тегирование отключено',excluded_group_id:'Исключённая группа',collab_group_name:'Группа-коллаб'};
+function error(e) { $('error').textContent = e.message || String(e); }
+function remember(id) { try { localStorage.setItem('bulk-tagging-job', id); } catch {} }
+function remembered() { try { return localStorage.getItem('bulk-tagging-job'); } catch { return null; } }
+async function api(url, method='GET', body) {
+ const response=await fetch(url,{method,headers:{'Content-Type':'application/json','X-Tagging-Token':$('token').value},body:body ? JSON.stringify(body) : undefined,cache:'no-store'});
+ const data=await response.json();if(!response.ok || !data.ok)throw Error(data.error || 'Ошибка запроса');return data;
+}
+function render(job) {
+ lastJob=job; jobId=job.job_id; remember(jobId); $('job').hidden=false;
+ active=['selecting','running'].includes(job.status);
+ $('status').textContent=statusNames[job.status] || job.status;
+ $('period').textContent=job.period.from+' — '+job.period.to+' · Москва';
+ for(const key of ['selected','excluded','updated','skipped','failed'])$(key).textContent=job[key];
+ $('progress').max=Math.max(job.selected,1);$('progress').value=job.checked;
+ $('details').textContent='Найдено: '+job.found+'. Обработано: '+job.checked+' из '+job.selected+(job.current_task_id ? '. Сейчас: задача '+job.current_task_id : '')+(job.cancel_requested ? '. Остановка запрошена.' : '')+(job.error ? '\n'+job.error : '')+'\n'+Object.entries(job.excluded_reasons).map(([key,value])=>(reasons[key]||key)+': '+value).join(' · ');
+ $('start').disabled=job.status!=='ready'||!job.selected;$('start').textContent='Установить теги · '+job.selected;
+ $('select').disabled=active;$('cancel').disabled=!['selecting','ready','running'].includes(job.status)||job.cancel_requested;$('remove').disabled=active;
+ const results=new Map(job.results.map(result=>[result.task_id,result]));
+ $('rows').replaceChildren();
+ for(const task of job.tasks){
+  const result=results.get(task.id),row=document.createElement('tr');
+  const description=result ? (result.error || (result.outcome==='updated'?'Теги обновлены':reasons[result.reason]||result.reason||'Пропущено')) : new Date(task.closed_date).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})+' · группа '+task.group_id;
+  for(const value of [task.id,task.title,description,(result?.tags||[]).join(', ')]){const cell=document.createElement('td');cell.textContent=value;row.append(cell);}
+  if(result?.mediaWarnings?.length){row.children[2].textContent+=' · часть медиа недоступна';}
+  $('rows').append(row);
+ }
+ $('page').textContent=job.selected ? (offset+1)+'–'+Math.min(offset+100,job.selected)+' из '+job.selected : 'Нет задач';
+ $('prev').disabled=offset===0;$('next').disabled=offset+100>=job.selected;
+}
+async function refresh() {
+ clearTimeout(timer);if(!jobId)return;
+ try{render(await api('/tagging/status?jobId='+encodeURIComponent(jobId)+'&offset='+offset));if(active)timer=setTimeout(refresh,2000);}
+ catch(e){error(e);$('details').textContent+='\nСвязь прервана. Нажмите «Обновить»; фоновая обработка может продолжаться.';}
+}
+$('selection').addEventListener('submit',async event=>{
+ event.preventDefault();$('error').textContent='';$('select').disabled=true;clearTimeout(timer);
+ try{offset=0;render(await api('/tagging/select','POST',{from:$('from').value,to:$('to').value}));await refresh();}catch(e){error(e);$('select').disabled=active;}
+});
+$('start').onclick=async()=>{ $('start').disabled=true;$('error').textContent='';try{await api('/tagging/start?jobId='+encodeURIComponent(jobId),'POST');await refresh();}catch(e){error(e);if(lastJob)render(lastJob);} };
+$('cancel').onclick=async()=>{try{await api('/tagging/cancel?jobId='+encodeURIComponent(jobId),'POST');await refresh();}catch(e){error(e);}};
+$('refresh').onclick=()=>{ $('error').textContent='';refresh(); };
+$('prev').onclick=()=>{offset=Math.max(0,offset-100);refresh();};$('next').onclick=()=>{offset+=100;refresh();};
+$('resume').onclick=()=>{jobId=remembered();offset=0;if(jobId)refresh();else error(Error('Нет сохранённого запуска в этом браузере.'));};
+$('remove').onclick=async()=>{try{await api('/tagging/job?jobId='+encodeURIComponent(jobId),'DELETE');clearTimeout(timer);jobId=null;lastJob=null;remember('');$('job').hidden=true;$('select').disabled=false;}catch(e){error(e);}};
+</script></main></body></html>
