@@ -47,14 +47,14 @@ test('selection paginates short pages using hasMore, deduplicates, and sends ser
  const bulk=createBulkTagging(deps),job=await select(bulk);
  assert.equal(job.status,'ready');assert.deepEqual(job.tasks.map(t=>t.id),['1','2','3']);assert.equal(state.writes.length,0);assert.equal(state.ai.length,0);
  const calls=state.calls.filter(c=>c.url==='/tasks/search');assert.deepEqual(calls.map(c=>c.body.offset),[0,2]);
- assert.equal(calls[0].body.autoWindow,false);assert.equal(calls[0].body.filter.realStatus,5);
+ assert.equal(calls[0].body.autoWindow,false);assert.equal('realStatus' in calls[0].body.filter,false);assert.equal('status' in calls[0].body.filter,false);
  assert.deepEqual(calls[0].body.filter.groupId.$nin,[12,58,92,140,376,490]);
  assert.deepEqual(calls[0].body.filter.closedDate,{$gte:'2025-08-31T21:00:00.000Z',$lt:'2025-09-30T21:00:00.000Z'});
 });
-test('selection independently excludes IDs, collabs, open tasks and exact upper bound',async()=>{
+test('selection independently excludes IDs, collabs and exact upper bound but accepts reopened tasks',async()=>{
  const {bulk,state}=setup();
  state.tasks=[task(1),task(2,{groupId:12}),task(3,{groupName:'Коллаб партнёров'}),task(4,{status:2}),task(5,{closedDate:'2025-09-30T21:00:00Z'}),task(6,{closedDate:'2025-08-31T20:59:59Z'}),task(7,{closedDate:'2025-08-31T21:00:00Z'}),task(8,{closedDate:'2025-09-30T20:59:59.999Z'})];
- const job=await select(bulk);assert.equal(job.status,'ready');assert.deepEqual(job.tasks.map(t=>t.id),['1','7','8']);assert.equal(job.excluded,5);
+ const job=await select(bulk);assert.equal(job.status,'ready');assert.deepEqual(job.tasks.map(t=>t.id),['1','4','7','8']);assert.equal(job.excluded,4);
 });
 test('missing group name is fetched and collabs/unknown groups never reach AI',async()=>{
  for(const name of ['Коллаб проект','']){
@@ -66,8 +66,8 @@ test('historical task without summary is processed; fresh task and current manua
  const {bulk,state}=setup();state.current.tags=['manual'];
  const result=await bulk.processTask('1',period);assert(result.updated);assert.equal(state.ai.length,1);assert.equal(state.writes.length,1);assert.deepEqual(state.writes[0].current.tags,['manual']);
 });
-test('changed group, status or close date during AI blocks write',async()=>{
- for(const change of [{groupId:12},{status:2},{closedDate:'2025-10-01T00:00:00Z'}]){
+test('changed group or close date during AI blocks write',async()=>{
+ for(const change of [{groupId:12},{closedDate:'2025-10-01T00:00:00Z'}]){
   const {state,deps}=setup();deps.classify=async()=>{Object.assign(state.current,change);return {tagClassification:{found:true}};};
   const bulk=createBulkTagging(deps);assert((await bulk.processTask('1',period)).skipped);assert.equal(state.writes.length,0);
  }
@@ -135,5 +135,14 @@ test('group authentication and transient API failures remain visible, not treate
   const {deps}=setup();const original=deps.request;
   deps.request=async(method,url,body)=>{if(url.startsWith('/workgroups/'))throw Object.assign(Error('API failure'),{statusCode});return original(method,url,body);};
   const job=await select(createBulkTagging(deps));assert.equal(job.status,'failed');assert.equal(job.error,'API failure');assert.equal(job.excluded,0);
+ }
+});
+
+test('tagging ignores current or changed status when close date remains in range',async()=>{
+ for(const status of [2,3,5,undefined]){
+  const {state,deps}=setup();state.current.status=status;
+  deps.classify=async()=>{state.current.status=2;return {tagClassification:{found:true}};};
+  const result=await createBulkTagging(deps).processTask('1',period);
+  assert.equal(result.updated,true);assert.equal(state.writes.length,1);
  }
 });

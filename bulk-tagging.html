@@ -12,7 +12,7 @@
 <p class="muted">Выберите даты закрытия задач. Сначала проверьте отбор, затем запустите установку тегов.</p>
 <section class="card"><form id="selection">
 <div class="fields"><label>Закрыты с<input id="from" type="date" required></label><label>По дату включительно<input id="to" type="date" required></label></div>
-<p class="muted">Время Москвы (UTC+3). Только завершённые задачи. Исключены группы <strong>12, 58, 92, 140, 376, 490</strong> и группы с «коллаб» в названии. Заполненный summary не требуется. Ручные теги сохраняются.</p>
+<p class="muted">Время Москвы (UTC+3). Задачи с датой закрытия в выбранном периоде, независимо от текущего статуса. Исключены группы <strong>12, 58, 92, 140, 376, 490</strong> и группы с «коллаб» в названии. Заполненный summary не требуется. Ручные теги сохраняются.</p>
 <div class="actions"><button class="primary" id="select" type="submit">Найти задачи</button><button id="resume" type="button">Восстановить последний запуск</button></div>
 </form></section>
 <p id="error" class="error" role="alert"></p>
@@ -29,7 +29,7 @@
 const $ = id => document.getElementById(id);
 let jobId = null, offset = 0, timer, active = false, lastJob;
 const statusNames = {selecting:'Идёт отбор задач…',ready:'Отбор готов. Можно установить теги.',running:'Устанавливаем теги…',completed:'Обработка завершена',cancelled:'Остановлено',failed:'Запуск завершился с ошибкой'};
-const reasons = {excluded_group:'Исключённая группа',collab_group:'Группа-коллаб',group_unknown:'Группу не удалось проверить',group_not_found:'Группа недоступна или не найдена (404)',not_closed:'Задача уже не закрыта',outside_period:'Дата закрытия вне периода',same_value:'Теги уже установлены',classification_empty:'Нет категорий для тегов',ai_tags_missing_or_invalid:'AI не вернул корректные теги',tagging_disabled:'Тегирование отключено',excluded_group_id:'Исключённая группа',collab_group_name:'Группа-коллаб'};
+const reasons = {excluded_group:'Исключённая группа',collab_group:'Группа-коллаб',group_unknown:'Группу не удалось проверить',group_not_found:'Группа недоступна или не найдена (404)',outside_period:'Дата закрытия вне периода',same_value:'Теги уже установлены',classification_empty:'Нет категорий для тегов',ai_tags_missing_or_invalid:'AI не вернул корректные теги',tagging_disabled:'Тегирование отключено',excluded_group_id:'Исключённая группа',collab_group_name:'Группа-коллаб'};
 function error(e) { $('error').textContent = e.message || String(e); }
 function remember(id) { try { localStorage.setItem('bulk-tagging-job', id); } catch {} }
 function remembered() { try { return localStorage.getItem('bulk-tagging-job'); } catch { return null; } }

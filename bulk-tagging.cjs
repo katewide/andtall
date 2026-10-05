@@ -27,7 +27,6 @@ function createBulkTagging(deps) {
   const ttl = 24 * 60 * 60 * 1000;
 
   async function eligibility(task, period, groupCache) {
-    if (String(task.status ?? task.STATUS ?? task.realStatus ?? task.REAL_STATUS) !== '5') return 'not_closed';
     const closed = Date.parse(closedDate(task));
     if (!Number.isFinite(closed) || closed < period.start || closed >= period.end) return 'outside_period';
     const groupId = getGroupId(task);
@@ -74,8 +73,8 @@ function createBulkTagging(deps) {
       for (let offset = 0; ; ) {
         if (job.cancelRequested) { job.status = 'cancelled'; break; }
         const response = await request('POST', '/tasks/search', {
-          filter: { realStatus: 5, closedDate: { $gte: new Date(job.period.start).toISOString(), $lt: new Date(job.period.end).toISOString() }, groupId: { $nin: [...excludedGroupIds].map(Number) } },
-          select: ['id', 'title', 'status', 'groupId', 'closedDate'],
+          filter: { closedDate: { $gte: new Date(job.period.start).toISOString(), $lt: new Date(job.period.end).toISOString() }, groupId: { $nin: [...excludedGroupIds].map(Number) } },
+          select: ['id', 'title', 'groupId', 'closedDate'],
           order: { id: 'asc' }, autoWindow: false, limit: 50, offset, withTotal: false,
         });
         if (response?.success === false || response?.meta?.pageErrorSample) throw Error('API вернул неполную выборку. Запустите отбор повторно.');
@@ -123,7 +122,7 @@ function createBulkTagging(deps) {
     const analysis = await classify(id, task => eligibility(task, period));
     if (analysis.skipped) return analysis;
     // Historical tasks need no SUMMARY. Re-read to preserve current manual tags and
-    // recheck the actual status, close date and group immediately before PATCH.
+    // recheck the close date and group immediately before PATCH.
     const current = normalizeTask(await request('GET', `/tasks/${id}`));
     reason = await eligibility(current, period);
     if (reason) return { skipped: true, reason };
