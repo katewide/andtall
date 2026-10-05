@@ -188,3 +188,29 @@ test('bulk eligibility callback rejects moved tasks before AI work',async()=>{
  const result=await c.processClosedTask('1',{dryRun:true,preview:true,tagsOnly:true,validateTask:async()=> 'excluded_group'});
  assert.equal(result.reason,'excluded_group');assert.equal(state.ai,0);assert(!state.calls.some(call=>call.method==='PATCH'));
 });
+
+test('object parser rejects missing names and null placeholders without rejecting valid identifiers',()=>{
+ const {c}=setup();
+ const invalid=[null,undefined,'null','NULL',' NuLl ','undefined','UNDEFINED','','   '];
+ for(const name of invalid){
+  const result=c.extractTaskTagClassification('[AI_TAGS]'+JSON.stringify({type:null,objects:['документ'],object_names:[{type:'документ',name}]})+'[/AI_TAGS]');
+  assert.equal(result.found,true);assert.equal(result.objects.length,0);assert.equal(result.object_names.length,0);assert.equal(c.buildManagedTaskTags(result).length,0);
+ }
+ for(const name of ['СчетНаОплату','NullHandler','Null_Проверка']){
+  const result=c.extractTaskTagClassification('[AI_TAGS]'+JSON.stringify({object_names:[{type:'документ',name}]})+'[/AI_TAGS]');
+  assert.equal(c.buildManagedTaskTags(result)[0],'object: документ_'+name);
+ }
+});
+test('formatter never serializes null placeholders in any tag component',()=>{
+ const {c}=setup();
+ for(const value of [null,undefined,'null',' NULL ','undefined','',' ']){
+  const result=c.buildManagedTaskTags({type:value,products:[value,'ка'],object_names:[null,{type:'расширение',name:value},{type:value,name:'Имя'},{type:'расширение',name:'ЭЛРОС_Доработки'}]});
+  assert.deepEqual(JSON.parse(JSON.stringify(result)),['product: КА','object: расширение_ЭЛРОС_Доработки']);
+ }
+});
+test('invalid object name cannot enter task PATCH while valid product and manual tags remain',async()=>{
+ const {c,state}=setup();
+ const classification=c.extractTaskTagClassification('[AI_TAGS]{"products":["бп"],"object_names":[{"type":"документ","name":"null"}]}[/AI_TAGS]');
+ assert((await c.updateTaskTags('1',classification,state.task)).updated);
+ const patch=state.calls.find(call=>call.method==='PATCH');assert.deepEqual(JSON.parse(JSON.stringify(patch.body)),{tags:['manual','product: БП']});
+});
