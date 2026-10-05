@@ -1,0 +1,22 @@
+{
+  "name": "bitrix24-task-monitor",
+  "version": "1.0.0",
+  "description": "Мониторинг задач Битрикс24 с проверкой TIME_SPENT_IN_LOGS и отправкой уведомлений в чат",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node --test tests/*.test.cjs"
+  },
+  "keywords": [
+    "bitrix24",
+    "webhook",
+    "tasks",
+    "monitoring"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "sqlite3": "^5.1.6"
+  }
+}

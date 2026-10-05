@@ -1,0 +1,177 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+const section = (a,b) => source.slice(source.indexOf(a),source.indexOf(b,source.indexOf(a)));
+function setup() {
+  const state = { task:{UF_TASK_SUMMARY:'Ready',tags:['manual']}, calls:[], queued:[], ai:0, error:false };
+  const c = vm.createContext({
+    TASK_SUMMARY_FIELD_CODE:'UF_TASK_TITLE', TASK_RESULT_FIELD_CODE:'UF_TASK_SUMMARY', TASK_TAG_FIELD_NAME:'tags', TASK_TAGGING_ENABLED:true,
+    TASK_TAXONOMY:{types:['консультация'],products:['бп'],objects:['документ']},
+    SUMMARY_MODEL_NAME:'test',OPEN_TASK_AI_REQUEST_TIMEOUT_MS:100,AI_PREVIEW_TIMEOUT_MS:200,
+    normalizeId:x=>x==null?null:String(x), normalizeTaskPayload:x=>x, log(){},saveDebug(){},truncateDebugText:x=>x,
+    markRecentAiTagUpdate(){},recentAiTagUpdates:new Map(), Date,
+    closedTaskProcessingTaskIds:new Set(),previewContext:{getStore:()=>null},
+    setTimeout:fn=>state.queued.push(fn),runPreviewDeadline:fn=>fn(),
+    fetchTaskWithComments:async()=>({task:state.task,comments:[{message:'Original comment'}]}),
+    getGroupNameFromTask:()=>'',getGroupIdFromTask:()=>1,isCollabGroupName:()=>false,isGemmaExcludedGroupId:()=>false,
+    getTaskTextFields:()=>['Task'],getCommentMessage:x=>x.message,buildTaskTaggingInstructions:()=> 'tag instructions',normalizeAiContent:x=>x,
+    coworkRequest:async(method,url,body)=>{
+      state.calls.push({method,url,body});
+      if(method==='GET')return state.task;
+      if(url==='/chat/completions'){state.ai++;if(state.onAI)state.onAI();return {choices:[{message:{content:'[AI_TAGS]{"type":"консультация","products":["бп"]}[/AI_TAGS]'}}]};}
+      if(state.error)throw Error('write failed');
+      state.task.tags=body.tags;return {};
+    }
+  });
+  vm.runInContext(section('function getTaskSummaryFieldValue','function normalizeTaskTag')+section('function normalizeTaskTag','function markRecentAiTagUpdate')+section('async function updateTaskTags','function getImageMetadata'),c);
+  Object.assign(c, {
+    AI_PREVIEW_MEDIA_BUDGET_MS:100, AI_MAX_IMAGES:4, IMAGE_MODEL_NAME:'image',
+    filterGemmaComments:comments=>comments,
+    getParentIdFromTask:()=>null,getResponsibleIdFromTask:()=>1,getCreatorIdFromTask:()=>2,
+    fetchTaskTimeLogs:async()=>[],getTaskTimeSpent:()=>60,
+    prepareTaskImages:async()=>({images:[],candidates:[],candidatesCount:0}),
+    prepareTaskChatImages:async()=>({images:[],candidates:[],candidatesCount:0}),
+    prepareTaskChatAudioTranscripts:async()=>({transcripts:[],candidates:[],candidatesCount:0}),
+    extractImageFacts:async()=>null,withTimeout:p=>p,safePromise:p=>p,
+    TASK_TAGGING_PROMPT:fs.readFileSync(path.join(__dirname,'..','task-tagging.md'),'utf8'),
+  });
+  vm.runInContext(section('function getImageMetadata','function buildOpenTaskWatchPrompt')+
+    source.slice(source.indexOf('async function processClosedTask'),source.indexOf('\nasync function ',source.indexOf('async function processClosedTask')+10)),c);
+  return {c,state};
+}
+test('blank summary skips AI and PATCH; uppercase and camelCase field supported',async()=>{
+ const {c,state}=setup();state.task={ufTaskSummary:'  '};assert.equal((await c.processTaskSummaryTags('1')).reason,'task_summary_empty');assert.equal(state.calls.length,0);
+ assert.equal(c.getTaskResultFieldValue({customFields:{ufTaskSummary:'Title'}}),'Title');
+});
+test('summary classification patches only tags and preserves manual tags; repeated summary deduplicated',async()=>{
+ const {c,state}=setup();const result=await c.processTaskSummaryTags('1');assert(result.updated);assert.equal(state.ai,1);
+ const patch=state.calls.find(x=>x.method==='PATCH');assert.equal(patch.url,'/tasks/1');assert.deepEqual(JSON.parse(JSON.stringify(patch.body)),{tags:['manual','type: консультация','product: БП']});
+ assert.equal((await c.processTaskSummaryTags('1')).reason,'task_summary_already_tagged');assert.equal(state.ai,1);
+});
+test('summary changed during AI does not apply stale classification',async()=>{
+ const {c,state}=setup();state.onAI=()=>{state.task={...state.task,UF_TASK_SUMMARY:'Changed',tags:['new manual']}};
+ assert.equal((await c.processTaskSummaryTags('1')).reason,'task_summary_changed');assert(!state.calls.some(x=>x.method==='PATCH'));
+});
+test('failed writes can retry, successful close-handler result suppresses event duplicate',async()=>{
+ const {c,state}=setup();state.error=true;assert.equal((await c.processTaskSummaryTags('1')).error,'write failed');state.error=false;
+ assert((await c.processTaskSummaryTags('1')).updated);assert.equal(state.ai,2);
+ const cls=c.extractTaskTagClassification('[AI_TAGS]{"products":["бп"]}[/AI_TAGS]');
+ await c.applyTagsAfterTaskSummary('2',cls,'Ready');assert.equal((await c.processTaskSummaryTags('2')).reason,'task_summary_already_tagged');
+});
+test('queue returns immediately and merges simultaneous events',async()=>{
+ const {c,state}=setup();assert(c.queueTaskSummaryTags('1').queued);assert.equal(state.ai,0);assert.equal(c.queueTaskSummaryTags('1').queued,false);assert.equal(state.queued.length,1);
+ await state.queued.shift()();assert.equal(state.ai,1);
+});
+test('webhook sees summary change anywhere in batch, authenticates and ignores unrelated changes',async()=>{
+ const {c}=setup();Object.assign(c,{parseFormUrlEncoded:x=>x,getTaskIdFromOutgoingWebhook:()=> '1',WEBHOOK_TOKEN:'secret',getWebhookTimestampMs:()=>1,normalizeHistoryField:x=>String(x||'').replace(/[^a-z0-9]/gi,'').toUpperCase(),getLatestUpdateContext:async()=>({batch:[{field:'TAGS'},{field:'ufTaskSummary'}]})});
+ vm.runInContext(section('function isTaskSummaryFieldChange','function isStatusClosedChange'),c);
+ const start=source.indexOf('async function handleWebhook');const end=source.indexOf('\nfunction sendJson',start);
+ vm.runInContext(source.slice(start,end),c);
+ assert.equal((await c.handleWebhook({auth:{application_token:'wrong'}})).statusCode,403);
+ const result=await c.handleWebhook({auth:{application_token:'secret'},event:'ONTASKUPDATE'});assert(result.data.queued);
+ c.getLatestUpdateContext=async()=>({batch:[{field:'TAGS'}]});assert((await c.handleWebhook({auth:{application_token:'secret'},event:'ONTASKUPDATE'})).data.ignored);
+});
+test('SUMMARY extraction excludes TITLE and AI tags; missing summary does not fabricate text',()=>{
+ const {c}=setup();assert.equal(c.extractSummaryFieldText('[b]✅ SUMMARY:[/b] Done\n[b]📝 TITLE:[/b] Title\n[AI_TAGS]{}[/AI_TAGS]'),'Done');assert.equal(c.extractSummaryFieldText('INSUFFICIENT_INFORMATION'),'');
+});
+test('SUMMARY is updated and verified; silent failed write returns an error',async()=>{
+ const {c,state}=setup();c.coworkRequest=async(method,url,body)=>{if(method==='PATCH')state.task.UF_TASK_SUMMARY=body.UF_TASK_SUMMARY;return state.task;};
+ assert((await c.updateTaskResultField('1','New summary',state.task)).updated);assert.equal(state.task.UF_TASK_SUMMARY,'New summary');
+ c.coworkRequest=async()=>state.task;assert((await c.updateTaskResultField('1','Not saved',state.task)).error);
+});
+test('tags must be read back: silent failed write is not cached as success',async()=>{
+ const {c,state}=setup();c.coworkRequest=async()=>state.task;
+ const cls=c.extractTaskTagClassification('[AI_TAGS]{"products":["бп"]}[/AI_TAGS]');
+ assert((await c.applyTagsAfterTaskSummary('1',cls,'Ready')).error);assert.equal(c.hasCompletedTaskSummaryTags('1','Ready'),false);
+});
+test('close flow saves TITLE then SUMMARY then tags; summary failure blocks tags; preview writes nothing',async()=>{
+ const {c,state}=setup();const events=[];
+ const start=source.indexOf('  const generatedTitle = extractTitleFromAiComment(aiComment);'),end=source.indexOf('\n  return {',start);
+ vm.runInContext('async function finishClose(dryRun){const taskId="1",groupId="1",mainTask={tags:["manual"]},aiComment="[b]✅ SUMMARY:[/b] Done\\n[b]📝 TITLE:[/b] Ready",tagClassification={found:true,type:"консультация",products:["бп"],objects:[]};'+source.slice(start,end)+'return {taskTagsResult,taskTagsWouldBeUpdated};}',c);
+ c.isSummaryOnlyGroup=()=>false;c.extractTitleFromAiComment=()=> 'Ready';c.updateTaskSummaryField=async()=>{events.push('title');return {updated:true}};
+ c.updateTaskResultField=async(id,value)=>{events.push('summary');assert.equal(value,'Done');return {updated:true}};
+ c.applyTagsAfterTaskSummary=async()=>{events.push('tags');return {updated:true}};
+ await c.finishClose(false);assert.deepEqual(events,['title','summary','tags']);events.length=0;
+ c.updateTaskResultField=async()=>{events.push('summary');return {error:'failed'}};assert.equal((await c.finishClose(false)).taskTagsResult.reason,'task_summary_save_failed');assert.deepEqual(events,['title','summary']);events.length=0;
+ assert((await c.finishClose(true)).taskTagsWouldBeUpdated);assert.equal(events.length,0);
+});
+
+test('tag formatting and preview share casing and spacing; old formats require update',()=>{
+ const {c}=setup();
+ const classification={type:'консультация',products:['ка','зуп','ут','унф','бп','кэдо','эдо','1с-отчетность','erp','до','розница'],object_names:[{type:'роль',name:'РольOData'}]};
+ const expected=['type: консультация','product: КА','product: ЗУП','product: УТ','product: УНФ','product: БП','product: КЭДО','product: ЭДО','product: 1С-отчетность','product: ERP','product: ДО','product: Розница','object: роль_РольOData'];
+ assert.deepEqual(JSON.parse(JSON.stringify(c.buildManagedTaskTags(classification))),expected);
+ assert.equal(c.taskTagListsEqual(['product: ка'],['product: КА']),false);
+ assert.equal(c.taskTagListsEqual(['product:ка'],['product: КА']),false);
+ let html;c.res={writeHead(){},end(x){html=x}};
+ vm.runInContext(section('function sendAiTestPage','function getNextTaskTimeCheckDate'),c);vm.runInContext('sendAiTestPage(res)',c);
+ const script=html.match(/<script>([\s\S]*?)<\/script>/)[1];
+ const browser=vm.createContext({document:{getElementById:()=>({addEventListener(){}})}});vm.runInContext(script,browser);
+ assert.deepEqual(JSON.parse(JSON.stringify(browser.buildManagedTaskTags(classification))),expected);
+});
+
+test('tag request excludes generated fields and old tags, retains native title and source comment', async()=>{
+ const {c,state}=setup();
+ state.task={title:'Original title', UF_TASK_SUMMARY:'SECRET SUMMARY', UF_TASK_TITLE:'SECRET TITLE',tags:['SECRET TAG'],customFields:{ufTaskSummary:'NESTED SECRET'}};
+ await c.processTaskSummaryTags('1');
+ const prompt=state.calls.find(x=>x.url==='/chat/completions').body.messages[0].content;
+ for(const secret of ['SECRET SUMMARY','SECRET TITLE','SECRET TAG','NESTED SECRET']) assert(!prompt.includes(secret));
+ assert(prompt.includes('Original title'));assert(prompt.includes('Original comment'));
+});
+test('technical name in original human comment is retained; generated comments excluded',()=>{
+ const {c}=setup();Object.assign(c,{GEMMA_COMMENT_AUTHOR_ID:'204',getCommentAuthorId:x=>x.authorId});
+ vm.runInContext(section('function isGemmaComment','function normalizeMimeType'),c);
+ const comments=c.filterGemmaComments([
+ {authorId:'1',message:'Анализировался Внешний отчет ОтчетПоЧисленностиИФОТ'},
+ {authorId:'204',message:'Generated by service'},
+ {authorId:'1',message:'[b]✅ SUMMARY:[/b] Generated result'},
+ {authorId:'1',message:'[AI_TAGS]{}[/AI_TAGS]'}
+ ]);
+ assert.equal(comments.length,1);assert(comments[0].message.includes('ОтчетПоЧисленностиИФОТ'));
+
+});
+test('combined response supplies summary, title and tags from one AI call',async()=>{
+ const {c,state}=setup();
+ const raw='[b]✅ SUMMARY:[/b] Work done\n[b]📝 TITLE:[/b] Analysis\n[AI_TAGS]{"type":"консультация","products":["бп"]}[/AI_TAGS]';
+ const original=c.coworkRequest;
+ c.coworkRequest=async(method,url,body)=>{
+   if(url==='/chat/completions'){state.ai++;state.calls.push({method,url,body});return {choices:[{message:{content:raw}}]};}
+   return original(method,url,body);
+ };
+ const result=await c.processClosedTask('1',{dryRun:true,preview:true,tagsOnly:true});
+ assert.equal(state.ai,1);assert.equal(result.tagClassification.products[0],'бп');
+ const clean=c.stripTaskTagBlock(raw);assert(!clean.includes('AI_TAGS'));
+ assert.equal(c.extractSummaryFieldText(clean),'Work done');
+ const prompt=state.calls[0].body.messages[0].content;
+ assert(prompt.includes('После SUMMARY и TITLE'));assert(!prompt.includes('Верни только технический блок'));
+});
+test('task comments remain available when chat also has messages',async()=>{
+ const {c}=setup();Object.assign(c,{
+ coworkRequest:async(method,url)=>url.endsWith('/comments')?[{authorId:'1',message:'Only in comments'}]:{},
+ fetchTaskChatMessages:async()=>({messages:[{authorId:'1',message:'Only in chat'}]}),
+ normalizeCommentsPayload:x=>x,isUserChatMessage:()=>true,normalizeChatComment:x=>x,getCommentAuthorId:x=>x.authorId,
+ });
+ vm.runInContext(section('async function fetchTaskWithComments','async function fetchTaskTimeLogs'),c);
+ const result=await c.fetchTaskWithComments('1');assert.equal(result.comments.length,2);
+});
+test('close writes all three parts of one response and summary event reuses completion',async()=>{
+ const {c,state}=setup();
+ vm.runInContext(section('function isInsufficientInfoComment','function isDoneStageChange')+section('function extractTitleFromAiComment','function getTaskSummaryFieldValue'),c);
+ const raw='[b]✅ SUMMARY:[/b] Work done\n[b]📝 TITLE:[/b] Analysis\n[AI_TAGS]{"type":"консультация","products":["бп"]}[/AI_TAGS]';
+ c.coworkRequest=async(method,url,body)=>{
+  state.calls.push({method,url,body});
+  if(url==='/chat/completions'){state.ai++;return {choices:[{message:{content:raw}}]};}
+  if(method==='PATCH') Object.assign(state.task,body);
+  return state.task;
+ };
+ const result=await c.processClosedTask('1');
+ assert.equal(state.ai,1);assert.equal(state.task.UF_TASK_TITLE,'Analysis');assert.equal(state.task.UF_TASK_SUMMARY,'Work done');
+ assert(state.task.tags.includes('product: БП'));assert(result.task_tags_updated);
+ const comment=state.calls.find(x=>x.url==='/tasks/1/comments').body.message;
+ assert(comment.includes('Work done'));assert(comment.includes('Analysis'));assert(!comment.includes('AI_TAGS'));
+ assert.equal((await c.processTaskSummaryTags('1')).reason,'task_summary_already_tagged');assert.equal(state.ai,1);
+});
+
