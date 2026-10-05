@@ -29,7 +29,7 @@
 const $ = id => document.getElementById(id);
 let jobId = null, offset = 0, timer, active = false, lastJob;
 const statusNames = {selecting:'Идёт отбор задач…',ready:'Отбор готов. Можно установить теги.',running:'Устанавливаем теги…',completed:'Обработка завершена',cancelled:'Остановлено',failed:'Запуск завершился с ошибкой'};
-const reasons = {excluded_group:'Исключённая группа',collab_group:'Группа-коллаб',group_unknown:'Группу не удалось проверить',group_not_found:'Группа недоступна или не найдена (404)',outside_period:'Дата закрытия вне периода',same_value:'Теги уже установлены',classification_empty:'Нет категорий для тегов',ai_tags_missing_or_invalid:'AI не вернул корректные теги',tagging_disabled:'Тегирование отключено',excluded_group_id:'Исключённая группа',collab_group_name:'Группа-коллаб'};
+const reasons = {excluded_group:'Исключённая группа',collab_group:'Группа-коллаб',group_unknown:'Не удалось определить название группы даже из задачи',outside_period:'Дата закрытия вне периода',same_value:'Теги уже установлены',classification_empty:'Нет категорий для тегов',ai_tags_missing_or_invalid:'AI не вернул корректные теги',tagging_disabled:'Тегирование отключено',excluded_group_id:'Исключённая группа',collab_group_name:'Группа-коллаб'};
 function error(e) { $('error').textContent = e.message || String(e); }
 function remember(id) { try { localStorage.setItem('bulk-tagging-job', id); } catch {} }
 function remembered() { try { return localStorage.getItem('bulk-tagging-job'); } catch { return null; } }
@@ -44,7 +44,7 @@ function render(job) {
  $('period').textContent=job.period.from+' — '+job.period.to+' · Москва';
  for(const key of ['selected','excluded','updated','skipped','failed'])$(key).textContent=job[key];
  $('progress').max=Math.max(job.selected,1);$('progress').value=job.checked;
- $('details').textContent='Найдено: '+job.found+'. Обработано: '+job.checked+' из '+job.selected+(job.current_task_id ? '. Сейчас: задача '+job.current_task_id : '')+(job.cancel_requested ? '. Остановка запрошена.' : '')+(job.error ? '\n'+job.error : '')+'\n'+Object.entries(job.excluded_reasons).map(([key,value])=>(reasons[key]||key)+': '+value).join(' · ');
+ $('details').textContent='Найдено: '+job.found+'. Обработано: '+job.checked+' из '+job.selected+(job.current_task_id ? '. Сейчас: задача '+job.current_task_id : '')+(job.cancel_requested ? '. Остановка запрошена.' : '')+(job.error ? '\n'+job.error : '')+'\n'+Object.entries(job.excluded_reasons).map(([key,value])=>(reasons[key]||key)+': '+value).join(' · ')+'\n'+(job.excluded_group_details||[]).map(item=>'Группа '+(item.group_id??'не указана')+': '+item.count+' — '+(reasons[item.reason]||item.reason)).join('\n');
  $('start').disabled=job.status!=='ready'||!job.selected;$('start').textContent='Установить теги · '+job.selected;
  $('select').disabled=active;$('cancel').disabled=!['selecting','ready','running'].includes(job.status)||job.cancel_requested;$('remove').disabled=active;
  const results=new Map(job.results.map(result=>[result.task_id,result]));

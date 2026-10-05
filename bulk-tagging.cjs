@@ -27,13 +27,16 @@ function createBulkTagging(deps) {
   const closedDate = task => task.closedDate || task.CLOSED_DATE;
   const ttl = 24 * 60 * 60 * 1000;
 
-  async function eligibility(task, period, groupCache) {
+  async function eligibility(task, period, groupCache, detailsChecked = false) {
     const closed = Date.parse(closedDate(task));
     if (!Number.isFinite(closed) || closed < period.start || closed >= period.end) return 'outside_period';
     const groupId = getGroupId(task);
     if (groupId == null || !/^\d+$/.test(String(groupId))) return 'group_unknown';
     if (excludedGroupIds.has(String(groupId))) return 'excluded_group';
-    if (isCollab(getGroupName(task))) return 'collab_group';
+    const embeddedName = getGroupName(task);
+    if (typeof embeddedName === 'string' && embeddedName.trim()) {
+      return isCollab(embeddedName) ? 'collab_group' : null;
+    }
     let info = groupCache?.get(String(groupId));
     if (!info) {
       // Do not use the legacy persistent group cache before writes: names can change.
@@ -44,14 +47,24 @@ function createBulkTagging(deps) {
         const name = group?.name || group?.NAME || group?.title || group?.TITLE;
         info = { reason: !name ? 'group_unknown' : isCollab(name) ? 'collab_group' : null };
       } catch (error) {
-        // A historical task can outlive its group. Skip it without aborting the
-        // entire selection, but do not hide timeouts, rate limits or auth failures.
+        // Workgroup access differs from task access. A 404 is not proof
+        // that an accessible task must be excluded; try its embedded group below.
         if (error.statusCode !== 404) throw error;
         info = { reason: 'group_not_found' };
       }
       if (groupCache) groupCache.set(String(groupId), info);
     }
-    return info.reason;
+    if (['group_not_found', 'group_unknown'].includes(info.reason) && !detailsChecked) {
+      const detail = normalizeTask(await request('GET', `/tasks/${taskId(task)}`));
+      if (!detail || taskId(detail) !== taskId(task)) throw Error('API вернул другую задачу при проверке группы.');
+      const fallbackCache = groupCache || new Map([[String(groupId), info]]);
+      const reason = await eligibility(detail, period, fallbackCache, true);
+      // Selection metadata must reflect the same fresh task that passed the checks.
+      Object.assign(task, detail);
+      return reason;
+    }
+    // Keep the collab restriction if neither endpoint supplied a group name.
+    return info.reason === 'group_not_found' ? 'group_unknown' : info.reason;
   }
 
   function publicJob(job, offset = 0) {
@@ -62,7 +75,8 @@ function createBulkTagging(deps) {
       created_at: job.createdAt, finished_at: job.finishedAt,
       excluded_groups: [...excludedGroupIds],
       tasks: job.tasks.slice(offset, offset + 100), results: job.results.slice(offset, offset + 100),
-      offset, page_size: 100, excluded_reasons: job.excludedReasons };
+      offset, page_size: 100, excluded_reasons: job.excludedReasons,
+      excluded_group_details: Object.values(job.excludedGroupDetails) };
   }
 
   async function selectTasks(job) {
@@ -88,7 +102,12 @@ function createBulkTagging(deps) {
           seen.add(id); added++; job.found++;
           if (seen.size > 50000) throw Error('В периоде более 50 000 задач. Сузьте период; запись ещё не запускалась.');
           const reason = await eligibility(task, job.period, groups);
-          if (reason) { job.excluded++; job.excludedReasons[reason] = (job.excludedReasons[reason] || 0) + 1; }
+          if (reason) {
+            job.excluded++; job.excludedReasons[reason] = (job.excludedReasons[reason] || 0) + 1;
+            const key = `${getGroupId(task) ?? 'unknown'}:${reason}`;
+            const detail = job.excludedGroupDetails[key] ||= { group_id: getGroupId(task) ?? null, reason, count: 0 };
+            detail.count++;
+          }
           else job.tasks.push({ id, title: title(task), closed_date: closedDate(task), group_id: String(getGroupId(task)) });
         }
         const more = response?.meta?.hasMore ?? (page.length === 50);
@@ -107,7 +126,7 @@ function createBulkTagging(deps) {
     if (busy()) throw httpError(409, 'Уже выполняется отбор или обработка. Дождитесь завершения.');
     for (const [id, job] of jobs) if (Date.now() - (job.finishedAt || job.createdAt) > ttl && !['selecting', 'running'].includes(job.status)) jobs.delete(id);
     if (jobs.size >= 10) throw httpError(409, 'Сохранено 10 запусков. Удалите завершённый отбор перед новым.');
-    const job = { id: randomUUID(), period, status: 'selecting', tasks: [], results: [], found: 0, excluded: 0, excludedReasons: {}, updated: 0, skipped: 0, failed: 0, cancelRequested: false, createdAt: Date.now() };
+    const job = { id: randomUUID(), period, status: 'selecting', tasks: [], results: [], found: 0, excluded: 0, excludedReasons: {}, excludedGroupDetails: {}, updated: 0, skipped: 0, failed: 0, cancelRequested: false, createdAt: Date.now() };
     jobs.set(job.id, job);
     setImmediate(() => selectTasks(job));
     return job;

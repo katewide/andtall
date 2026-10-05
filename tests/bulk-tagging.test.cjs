@@ -16,7 +16,7 @@ function setup(overrides = {}) {
   normalizeTask: response => response.data,
   normalizeTasks: response => response.data,
   getGroupId: task => task.groupId,
-  getGroupName: task => task.groupName,
+  getGroupName: task => task.groupName || task.group?.name || task.group?.NAME,
   isCollab: name => String(name || '').toLowerCase().includes('коллаб'),
   excludedGroupIds: new Set(['12','58','92','140','376','490']),
   enabled: () => state.enabled,
@@ -111,15 +111,16 @@ test('tagging disabled blocks selection and historical writes',async()=>{
  assert.throws(()=>bulk.createSelection(period.from,period.to),{statusCode:409});assert.equal((await bulk.processTask('1',period)).reason,'tagging_disabled');assert.equal(state.ai.length,0);
 });
 
-test('missing historical group 276 does not abort selection; cached 404 skips its tasks and later pages continue',async()=>{
+test('unknown group after workgroup 404 and task fallback is excluded while later pages continue',async()=>{
  const {state,deps}=setup();const original=deps.request;let groupCalls=0;
  deps.request=async(method,url,body)=>{
   if(url==='/tasks/search')return {data:body.offset===0?[task(1,{groupId:276}),task(2,{groupId:276})]:[task(3)],meta:{hasMore:body.offset===0}};
+  if(url==='/tasks/1'||url==='/tasks/2')return {data:task(Number(url.split('/').pop()),{groupId:276})};
   if(url==='/workgroups/276'){groupCalls++;throw Object.assign(Error('workgroup 276 not found'),{statusCode:404,apiCode:'ENTITY_NOT_FOUND'});}
   return original(method,url,body);
  };
  const bulk=createBulkTagging(deps),job=await select(bulk);
- assert.equal(job.status,'ready');assert.equal(job.found,3);assert.equal(job.excluded,2);assert.deepEqual(job.tasks.map(t=>t.id),['3']);assert.equal(job.excludedReasons.group_not_found,2);assert.equal(groupCalls,1);assert.equal(state.ai.length,0);assert.equal(state.writes.length,0);
+ assert.equal(job.status,'ready');assert.equal(job.found,3);assert.equal(job.excluded,2);assert.deepEqual(job.tasks.map(t=>t.id),['3']);assert.equal(job.excludedReasons.group_unknown,2);assert.equal(groupCalls,1);assert.equal(state.ai.length,0);assert.equal(state.writes.length,0);
 });
 test('group disappearing before analysis or before write skips task without writing tags',async()=>{
  for(const disappearsAfterAI of [false,true]){
@@ -127,7 +128,7 @@ test('group disappearing before analysis or before write skips task without writ
   deps.request=async(method,url,body)=>{if(url.startsWith('/workgroups/')&&missing)throw Object.assign(Error('Not found'),{statusCode:404});return original(method,url,body);};
   deps.classify=async()=>{state.ai.push('1');missing=true;return {tagClassification:{found:true}};};
   const result=await createBulkTagging(deps).processTask('1',period);
-  assert.equal(result.reason,'group_not_found');assert.equal(state.writes.length,0);assert.equal(state.ai.length,disappearsAfterAI?1:0);
+  assert.equal(result.reason,'group_unknown');assert.equal(state.writes.length,0);assert.equal(state.ai.length,disappearsAfterAI?1:0);
  }
 });
 test('group authentication and transient API failures remain visible, not treated as missing groups',async()=>{
@@ -160,4 +161,39 @@ test('group zero blocks analysis and moving to group zero during AI blocks write
   const result=await createBulkTagging(deps).processTask('1',period);
   assert.equal(result.reason,'excluded_group');assert.equal(state.ai.length,movesDuringAI?1:0);assert.equal(state.writes.length,0);
  }
+});
+
+test('accessible task with embedded ordinary group is accepted without requesting workgroup endpoint',async()=>{
+ const {state,deps}=setup();state.tasks=[task(1,{group:{name:'Проект'}})];state.current=state.tasks[0];
+ const original=deps.request;deps.request=async(method,url,body)=>{if(url.startsWith('/workgroups/'))throw Error('Workgroup endpoint must not be used');return original(method,url,body);};
+ const bulk=createBulkTagging(deps),job=await select(bulk);assert.equal(job.status,'ready');assert.equal(job.tasks.length,1);
+ assert((await bulk.processTask('1',period)).updated);assert.equal(state.writes.length,1);
+});
+test('workgroup 404 falls back to task group on every task instead of caching a false exclusion',async()=>{
+ const {state,deps}=setup();let groupReads=0;
+ state.tasks=[task(1,{groupId:276}),task(2,{groupId:276}),task(3,{groupId:276})];
+ deps.request=async(method,url)=>{
+  if(url==='/tasks/search')return {data:state.tasks,meta:{hasMore:false}};
+  if(url.startsWith('/workgroups/')){groupReads++;throw Object.assign(Error('Not found'),{statusCode:404});}
+  const id=Number(url.split('/').pop());return {data:task(id,{groupId:276,group:{NAME:id===2?'Коллаб партнёров':'Проект'}})};
+ };
+ const bulk=createBulkTagging(deps),job=await select(bulk);
+ assert.equal(job.status,'ready');assert.deepEqual(job.tasks.map(t=>t.id),['1','3']);assert.equal(job.excludedReasons.collab_group,1);assert.equal(groupReads,1);
+ assert.deepEqual(bulk.publicJob(job).excluded_group_details,[{group_id:276,reason:'collab_group',count:1}]);
+ assert((await bulk.processTask('1',period)).updated);
+});
+test('embedded group changing to collab before write still blocks tagging',async()=>{
+ const {state,deps}=setup();state.current.group={name:'Проект'};
+ deps.classify=async()=>{state.current.group.name='Коллаб';return {tagClassification:{found:true}};};
+ assert.equal((await createBulkTagging(deps).processTask('1',period)).reason,'collab_group');assert.equal(state.writes.length,0);
+});
+test('40-task regression: 404 on group lookup does not discard 20 accessible ordinary tasks',async()=>{
+ const {deps}=setup();
+ deps.request=async(method,url)=>{
+  if(url==='/tasks/search')return {data:Array.from({length:40},(_,i)=>task(i+1,{groupId:i<10?8:276})),meta:{hasMore:false}};
+  if(url==='/workgroups/8')return {data:{name:'Проект'}};
+  if(url==='/workgroups/276')throw Object.assign(Error('Not found'),{statusCode:404});
+  const id=Number(url.split('/').pop());return {data:task(id,{groupId:276,group:{name:id>30?'Коллаб':'Проект'}})};
+ };
+ const job=await select(createBulkTagging(deps));assert.equal(job.status,'ready');assert.equal(job.found,40);assert.equal(job.tasks.length,30);assert.equal(job.excluded,10);assert.equal(job.excludedReasons.collab_group,10);
 });
