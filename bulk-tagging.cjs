@@ -1,4 +1,4 @@
-const { randomUUID, timingSafeEqual } = require('node:crypto');
+const { randomUUID } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const DAY = 86400000;
@@ -17,7 +17,7 @@ function parsePeriod(from, to) {
 }
 
 function createBulkTagging(deps) {
-  const { request, normalizeTask, normalizeTasks, getGroupId, getGroupName, isCollab, excludedGroupIds, classify, updateTags, deadline, enabled, token } = deps;
+  const { request, normalizeTask, normalizeTasks, getGroupId, getGroupName, isCollab, excludedGroupIds, classify, updateTags, deadline, enabled } = deps;
   const jobs = new Map();
   const terminal = job => !['selecting', 'ready', 'running'].includes(job.status);
   const busy = () => [...jobs.values()].find(job => ['selecting', 'running'].includes(job.status));
@@ -151,11 +151,6 @@ function createBulkTagging(deps) {
     return job;
   }
 
-  function authorize(req) {
-    const supplied = Buffer.from(String(req.headers['x-tagging-token'] || ''));
-    const expected = Buffer.from(token || '');
-    if (!expected.length || supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw httpError(403, 'Неверный ключ запуска.');
-  }
   async function jsonBody(req) {
     let body = '';
     for await (const chunk of req) { body += chunk; if (body.length > 4096) throw httpError(413, 'Слишком большой запрос.'); }
@@ -171,7 +166,6 @@ function createBulkTagging(deps) {
         res.end(req.method === 'HEAD' ? undefined : fs.readFileSync(path.join(__dirname, 'bulk-tagging.html'), 'utf8'));
         return true;
       }
-      authorize(req);
       if (url.pathname === '/tagging/select' && req.method === 'POST') {
         const body = await jsonBody(req); send(202, publicJob(createSelection(body.from, body.to))); return true;
       }

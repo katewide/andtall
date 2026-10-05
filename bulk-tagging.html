@@ -11,7 +11,7 @@
 <span class="badge">Задачи · Битрикс24</span><h1>Хэштеги за период</h1>
 <p class="muted">Выберите даты закрытия задач. Сначала проверьте отбор, затем запустите установку тегов.</p>
 <section class="card"><form id="selection">
-<div class="fields"><label>Закрыты с<input id="from" type="date" required></label><label>По дату включительно<input id="to" type="date" required></label><label>Ключ запуска<input id="token" type="password" required autocomplete="off" placeholder="BULK_TAGGING_TOKEN"></label></div>
+<div class="fields"><label>Закрыты с<input id="from" type="date" required></label><label>По дату включительно<input id="to" type="date" required></label></div>
 <p class="muted">Время Москвы (UTC+3). Только завершённые задачи. Исключены группы <strong>12, 58, 92, 140, 376, 490</strong> и группы с «коллаб» в названии. Заполненный summary не требуется. Ручные теги сохраняются.</p>
 <div class="actions"><button class="primary" id="select" type="submit">Найти задачи</button><button id="resume" type="button">Восстановить последний запуск</button></div>
 </form></section>
@@ -34,7 +34,7 @@ function error(e) { $('error').textContent = e.message || String(e); }
 function remember(id) { try { localStorage.setItem('bulk-tagging-job', id); } catch {} }
 function remembered() { try { return localStorage.getItem('bulk-tagging-job'); } catch { return null; } }
 async function api(url, method='GET', body) {
- const response=await fetch(url,{method,headers:{'Content-Type':'application/json','X-Tagging-Token':$('token').value},body:body ? JSON.stringify(body) : undefined,cache:'no-store'});
+ const response=await fetch(url,{method,headers:{'Content-Type':'application/json'},body:body ? JSON.stringify(body) : undefined,cache:'no-store'});
  const data=await response.json();if(!response.ok || !data.ok)throw Error(data.error || 'Ошибка запроса');return data;
 }
 function render(job) {

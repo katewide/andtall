@@ -19,7 +19,7 @@ function setup(overrides = {}) {
   getGroupName: task => task.groupName,
   isCollab: name => String(name || '').toLowerCase().includes('коллаб'),
   excludedGroupIds: new Set(['12','58','92','140','376','490']),
-  enabled: () => state.enabled, token: 'secret',
+  enabled: () => state.enabled,
   classify: async(id, validate) => { state.ai.push(id); const reason=await validate(state.current);return reason ? {skipped:true,reason} : {tagClassification:{found:true,type:'консультация',products:[],objects:[]}}; },
   updateTags: async(id, classification, current) => {state.writes.push({id,classification,current});return {updated:true,tags:['manual','type: консультация']};},
   deadline: fn => fn(), ...overrides,
@@ -28,8 +28,8 @@ function setup(overrides = {}) {
 }
 async function waitUntil(predicate) { for(let i=0;i<100;i++){if(predicate())return;await new Promise(resolve=>setImmediate(resolve));}throw Error('Job did not settle'); }
 async function select(bulk) { const job=bulk.createSelection(period.from,period.to);await waitUntil(()=>job.status!=='selecting');return job; }
-async function route(bulk, url, method='GET', body='', token='secret') {
- const req=Readable.from(body ? [body] : []);Object.assign(req,{url,method,headers:{'x-tagging-token':token}});
+async function route(bulk, url, method='GET', body='') {
+ const req=Readable.from(body ? [body] : []);Object.assign(req,{url,method,headers:{}});
  let status, result;
  await bulk.handle(req,{writeHead(code){status=code;},end(data){result=JSON.parse(data);}});
  return {status,result};
@@ -95,9 +95,8 @@ test('cancel stops after current task; competing selection is rejected while run
  const response=await route(bulk,'/tagging/cancel?jobId='+job.id,'POST');assert.equal(response.status,200);release();
  await waitUntil(()=>job.status==='cancelled');assert.equal(state.writes.length,1);assert.equal(job.results.length,1);
 });
-test('API requires token, rejects invalid dates/JSON and starts only an existing ready selection',async()=>{
+test('API works without tokens, rejects invalid dates/JSON and starts only an existing ready selection',async()=>{
  const {bulk}=setup();
- assert.equal((await route(bulk,'/tagging/select','POST','{}','wrong')).status,403);
  assert.equal((await route(bulk,'/tagging/select','POST','no-json')).status,400);
  assert.equal((await route(bulk,'/tagging/select','POST','{}')).status,400);
  assert.equal((await route(bulk,'/tagging/start?jobId=missing','POST')).status,404);

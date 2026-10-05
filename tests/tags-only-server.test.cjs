@@ -17,7 +17,7 @@ function boot() {
       return require(name);
     },
     __dirname: path.join(__dirname, '..'),
-    process: { env: { BASE_URL: 'https://example.invalid', API_KEY: 'test', WEBHOOK_TOKEN: 'test', TASK_TIME_CHECK_ENABLED: 'true', TASK_TIME_CHECK_RUN_ON_START: 'true', OPEN_TASK_CHECK_ENABLED: 'true', OPEN_TASK_CHECK_RUN_ON_START: 'true' } },
+    process: { env: { BASE_URL: 'https://example.invalid', API_KEY: 'test', TASK_TIME_CHECK_ENABLED: 'true', TASK_TIME_CHECK_RUN_ON_START: 'true', OPEN_TASK_CHECK_ENABLED: 'true', OPEN_TASK_CHECK_RUN_ON_START: 'true' } },
     console: { log() {}, error() {} }, URL, AbortController, Buffer,
     setTimeout(fn) { state.timers.push(fn); return { unref() {} }; }, clearTimeout() {},
     setInterval() { throw Error('Unexpected interval'); },
@@ -50,5 +50,12 @@ test('health endpoint stays available', async () => {
 test('ai-test serves the bulk close-date form without starting work', async () => {
  const state = boot(); let status, body;
  await state.handler({method:'GET',url:'/ai-test',headers:{}},{writeHead(code){status=code;},end(value){body=value;}});
- assert.equal(status,200);assert.match(body,/type="date"/);assert.match(body,/Хэштеги за период/);assert.equal(state.timers.length,0);
+ assert.equal(status,200);assert.match(body,/type="date"/);assert.match(body,/Хэштеги за период/);assert.doesNotMatch(body,/BULK_TAGGING_TOKEN|X-Tagging-Token|id="token"/);assert.equal(state.timers.length,0);
+});
+
+test('server boots without webhook token and disabled webhook cannot process requests', async () => {
+ const state=boot(); let status, body;
+ const req={method:'POST',url:'/webhook',headers:{},on(event, fn){if(event==='end')fn();return this;}};
+ await state.handler(req,{writeHead(code){status=code;},end(value){body=value;}});
+ assert.equal(status,404);assert.equal(JSON.parse(body).error,'Webhook disabled');assert.equal(state.timers.length,0);
 });

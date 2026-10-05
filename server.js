@@ -21,7 +21,8 @@ const BASE_URL = requireEnv('BASE_URL');
 const API_KEY = requireEnv('API_KEY');
 const SUMMARY_MODEL_NAME = process.env.SUMMARY_MODEL_NAME || process.env.MODEL_NAME || 'bitrix/google/gemma-4-26B-A4B-it';
 const IMAGE_MODEL_NAME = process.env.IMAGE_MODEL_NAME || 'bitrix/bitrixgpt-5.5';
-const WEBHOOK_TOKEN = requireEnv('WEBHOOK_TOKEN');
+// Optional legacy webhook; bulk tagging does not use it.
+const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || null;
 const ELAPSED_NOTIFICATION_CHAT_ID = process.env.ELAPSED_NOTIFICATION_CHAT_ID || 'chat42358';
 const BITRIX_PORTAL_URL = process.env.BITRIX_PORTAL_URL || 'https://elros.bitrix24.ru';
 const DATA_DIR = process.env.DATA_DIR || (process.env.NODE_ENV === 'production' ? '/data' : __dirname);
@@ -4714,6 +4715,7 @@ function queueClosedTaskProcessing(taskId, trigger) {
 }
 
 async function handleWebhook(body) {
+  if (!WEBHOOK_TOKEN) return { statusCode: 404, data: { ok: false, error: 'Webhook disabled' } };
   const data = parseFormUrlEncoded(body);
 
   const taskId = getTaskIdFromOutgoingWebhook(data);
@@ -5157,7 +5159,6 @@ const bulkTagging = require('./bulk-tagging.cjs').createBulkTagging({
   isCollab: isCollabGroupName,
   excludedGroupIds: GEMMA_EXCLUDED_GROUP_IDS,
   enabled: () => TASK_TAGGING_ENABLED,
-  token: process.env.BULK_TAGGING_TOKEN || WEBHOOK_TOKEN,
   classify: (taskId, validateTask) => processClosedTask(taskId, { dryRun: true, preview: true, tagsOnly: true, validateTask }),
   updateTags: (taskId, classification, task) => updateTaskTags(taskId, classification, task, { requireSummary: false }),
   deadline: operation => runPreviewDeadline(operation, AI_PREVIEW_TIMEOUT_MS),
