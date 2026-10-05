@@ -36,18 +36,24 @@ function createBulkTagging(deps) {
     if (isCollab(getGroupName(task))) return 'collab_group';
     // Personal tasks (group 0) were allowed by the original tagging scenario.
     if (String(groupId) === '0') return null;
-    let name;
-    if (groupCache?.has(String(groupId))) name = groupCache.get(String(groupId));
-    else {
+    let info = groupCache?.get(String(groupId));
+    if (!info) {
       // Do not use the legacy persistent group cache before writes: names can change.
-      const response = await request('GET', `/workgroups/${encodeURIComponent(groupId)}`);
-      const data = response?.data || response?.result || response;
-      const group = data?.workgroup || data?.group || data;
-      name = group?.name || group?.NAME || group?.title || group?.TITLE;
-      if (groupCache) groupCache.set(String(groupId), name);
+      try {
+        const response = await request('GET', `/workgroups/${encodeURIComponent(groupId)}`);
+        const data = response?.data || response?.result || response;
+        const group = data?.workgroup || data?.group || data;
+        const name = group?.name || group?.NAME || group?.title || group?.TITLE;
+        info = { reason: !name ? 'group_unknown' : isCollab(name) ? 'collab_group' : null };
+      } catch (error) {
+        // A historical task can outlive its group. Skip it without aborting the
+        // entire selection, but do not hide timeouts, rate limits or auth failures.
+        if (error.statusCode !== 404) throw error;
+        info = { reason: 'group_not_found' };
+      }
+      if (groupCache) groupCache.set(String(groupId), info);
     }
-    if (!name) return 'group_unknown';
-    return isCollab(name) ? 'collab_group' : null;
+    return info.reason;
   }
 
   function publicJob(job, offset = 0) {

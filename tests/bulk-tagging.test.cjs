@@ -110,3 +110,30 @@ test('tagging disabled blocks selection and historical writes',async()=>{
  const {bulk,state}=setup();state.enabled=false;
  assert.throws(()=>bulk.createSelection(period.from,period.to),{statusCode:409});assert.equal((await bulk.processTask('1',period)).reason,'tagging_disabled');assert.equal(state.ai.length,0);
 });
+
+test('missing historical group 276 does not abort selection; cached 404 skips its tasks and later pages continue',async()=>{
+ const {state,deps}=setup();const original=deps.request;let groupCalls=0;
+ deps.request=async(method,url,body)=>{
+  if(url==='/tasks/search')return {data:body.offset===0?[task(1,{groupId:276}),task(2,{groupId:276})]:[task(3)],meta:{hasMore:body.offset===0}};
+  if(url==='/workgroups/276'){groupCalls++;throw Object.assign(Error('workgroup 276 not found'),{statusCode:404,apiCode:'ENTITY_NOT_FOUND'});}
+  return original(method,url,body);
+ };
+ const bulk=createBulkTagging(deps),job=await select(bulk);
+ assert.equal(job.status,'ready');assert.equal(job.found,3);assert.equal(job.excluded,2);assert.deepEqual(job.tasks.map(t=>t.id),['3']);assert.equal(job.excludedReasons.group_not_found,2);assert.equal(groupCalls,1);assert.equal(state.ai.length,0);assert.equal(state.writes.length,0);
+});
+test('group disappearing before analysis or before write skips task without writing tags',async()=>{
+ for(const disappearsAfterAI of [false,true]){
+  const {state,deps}=setup();const original=deps.request;let missing=!disappearsAfterAI;
+  deps.request=async(method,url,body)=>{if(url.startsWith('/workgroups/')&&missing)throw Object.assign(Error('Not found'),{statusCode:404});return original(method,url,body);};
+  deps.classify=async()=>{state.ai.push('1');missing=true;return {tagClassification:{found:true}};};
+  const result=await createBulkTagging(deps).processTask('1',period);
+  assert.equal(result.reason,'group_not_found');assert.equal(state.writes.length,0);assert.equal(state.ai.length,disappearsAfterAI?1:0);
+ }
+});
+test('group authentication and transient API failures remain visible, not treated as missing groups',async()=>{
+ for(const statusCode of [401,403,429,500,503]){
+  const {deps}=setup();const original=deps.request;
+  deps.request=async(method,url,body)=>{if(url.startsWith('/workgroups/'))throw Object.assign(Error('API failure'),{statusCode});return original(method,url,body);};
+  const job=await select(createBulkTagging(deps));assert.equal(job.status,'failed');assert.equal(job.error,'API failure');assert.equal(job.excluded,0);
+ }
+});

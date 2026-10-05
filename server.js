@@ -384,7 +384,9 @@ function requestJson(endpoint, options = {}) {
         }
 
         if (res.statusCode < 200 || res.statusCode >= 300) {
-          reject(new Error(`HTTP ${res.statusCode} from ${endpoint.pathname}: ${data}`));
+          reject(Object.assign(new Error(`HTTP ${res.statusCode} from ${endpoint.pathname}: ${data}`), {
+            statusCode: res.statusCode, apiCode: json?.error?.code,
+          }));
           return;
         }
 
